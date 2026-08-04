@@ -1,0 +1,53 @@
+# -----------------------------------------------------------------------------
+# Cloudflared tunnel connector for https://litellm.woowtech.io
+#
+# NOTE: This REUSES the EXISTING Cloudflare tunnel. The tunnel routing (public
+# hostname -> http://litellm:4000) is configured in the Cloudflare dashboard /
+# existing tunnel config and must stay untouched. This Deployment only runs the
+# connector using the token from the cloudflared-token Secret. Do not create a
+# new tunnel or change the hostname mapping.
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: litellm
+  labels:
+    app: cloudflared
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          args:
+            - tunnel
+            - --no-autoupdate
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-token
+                  key: TUNNEL_TOKEN
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

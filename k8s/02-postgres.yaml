@@ -1,0 +1,82 @@
+# -----------------------------------------------------------------------------
+# Postgres persistence backend for LiteLLM (store_model_in_db, keys, budgets).
+# Headless Service + StatefulSet with a 5Gi local-path PVC.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-postgres
+  namespace: litellm
+  labels:
+    app: litellm-postgres
+spec:
+  clusterIP: None          # headless: stable DNS for the StatefulSet pod
+  selector:
+    app: litellm-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-postgres
+  namespace: litellm
+  labels:
+    app: litellm-postgres
+spec:
+  serviceName: litellm-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-postgres
+  template:
+    metadata:
+      labels:
+        app: litellm-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: litellm-postgres-secret
+          env:
+            # Point PGDATA at a subdir so the mount root can hold lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi
