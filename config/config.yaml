@@ -35,9 +35,17 @@ model_list:
       api_base: https://openrouter.ai/api/v1
 
   # --- extra popular OpenRouter models (optional convenience) ----------------
-  - model_name: claude-3.5-sonnet
+  # OpenRouter retired the bare `anthropic/claude-3.5-sonnet` slug: it answers
+  # 404 {"error":{"message":"No endpoints found for anthropic/claude-3.5-sonnet"}},
+  # so the deployment failed every /health probe AND every real request. It is
+  # repointed here at a slug OpenRouter currently serves, and the public
+  # model_name is renamed to match so the catalogue does not lie about what it
+  # routes to. Before adding or renaming any anthropic/* entry, check the slug
+  # against `GET https://openrouter.ai/api/v1/models` - OpenRouter retires the
+  # bare dated slugs as models age out.
+  - model_name: claude-sonnet-4.5
     litellm_params:
-      model: openrouter/anthropic/claude-3.5-sonnet
+      model: openrouter/anthropic/claude-sonnet-4.5
       api_key: os.environ/OPENROUTER_API_KEY
       api_base: https://openrouter.ai/api/v1
 
