@@ -1,0 +1,11 @@
+# Real secrets must never be committed - only examples/secrets.example.yaml.
+.env
+.env.*
+*.env
+secrets.yaml
+*-secrets.yaml
+*.secret.yaml
+
+# Database dumps contain every virtual key and encrypted credential.
+*.dump
+backups/

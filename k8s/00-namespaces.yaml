@@ -1,0 +1,19 @@
+# -----------------------------------------------------------------------------
+# Namespaces: litellm (gateway, database, tunnel, backups) and litellm-mcp
+# (MCP admin console). Secrets are NOT in k8s/ - see examples/secrets.example.yaml.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litellm
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/part-of: woow-litellm
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litellm-mcp
+  labels:
+    app.kubernetes.io/name: litellm-mcp
+    app.kubernetes.io/part-of: woow-litellm

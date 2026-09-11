@@ -1,6 +1,13 @@
 # -----------------------------------------------------------------------------
-# Postgres persistence backend for LiteLLM (store_model_in_db, keys, budgets).
-# Headless Service + StatefulSet with a 5Gi local-path PVC.
+# PostgreSQL 16 for LiteLLM: virtual keys, budgets, spend, UI-added models and
+# provider credentials encrypted with LITELLM_SALT_KEY.
+#
+# - Headless Service: DATABASE_URL uses host litellm-postgres:5432.
+# - Longhorn (Retain) 5Gi. PGDATA is a subdir because the ext4 root holds lost+found.
+# - Probes hardcode litellm/litellm, so POSTGRES_USER / POSTGRES_DB must stay "litellm".
+# - terminationGracePeriodSeconds 90 lets Postgres checkpoint instead of being killed.
+# - NetworkPolicy: only the proxy (app=litellm) and the backup job
+#   (app=litellm-backup) may reach 5432.
 # -----------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
@@ -8,15 +15,18 @@ metadata:
   name: litellm-postgres
   namespace: litellm
   labels:
+    app.kubernetes.io/part-of: woow-litellm
     app: litellm-postgres
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
 spec:
-  clusterIP: None          # headless: stable DNS for the StatefulSet pod
+  clusterIP: None
   selector:
     app: litellm-postgres
   ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
+  - name: postgres
+    port: 5432
+    targetPort: 5432
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -24,7 +34,10 @@ metadata:
   name: litellm-postgres
   namespace: litellm
   labels:
+    app.kubernetes.io/part-of: woow-litellm
     app: litellm-postgres
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
 spec:
   serviceName: litellm-postgres
   replicas: 1
@@ -35,48 +48,85 @@ spec:
     metadata:
       labels:
         app: litellm-postgres
+        app.kubernetes.io/part-of: woow-litellm
     spec:
+      terminationGracePeriodSeconds: 90
       containers:
+      - name: postgres
+        image: docker.io/library/postgres:16-alpine
+        ports:
         - name: postgres
-          image: postgres:16-alpine
-          ports:
-            - name: postgres
-              containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: litellm-postgres-secret
-          env:
-            # Point PGDATA at a subdir so the mount root can hold lost+found.
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
-          volumeMounts:
-            - name: pgdata
-              mountPath: /var/lib/postgresql/data
-          readinessProbe:
-            exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
-            initialDelaySeconds: 30
-            periodSeconds: 15
-            timeoutSeconds: 5
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-  volumeClaimTemplates:
-    - metadata:
-        name: pgdata
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        storageClassName: local-path
+          containerPort: 5432
+        envFrom:
+        - secretRef:
+            name: litellm-postgres-secret
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+        readinessProbe:
+          exec:
+            command: &id001
+            - pg_isready
+            - -U
+            - litellm
+            - -d
+            - litellm
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          exec:
+            command: *id001
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 6
         resources:
           requests:
-            storage: 5Gi
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 1Gi
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+      labels:
+        app: litellm-postgres
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: longhorn
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: litellm-postgres-ingress
+  namespace: litellm
+  labels:
+    app.kubernetes.io/part-of: woow-litellm
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
+spec:
+  podSelector:
+    matchLabels:
+      app: litellm-postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: litellm
+    - podSelector:
+        matchLabels:
+          app: litellm-backup
+    ports:
+    - protocol: TCP
+      port: 5432

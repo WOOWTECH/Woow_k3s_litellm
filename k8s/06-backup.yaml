@@ -1,0 +1,87 @@
+# -----------------------------------------------------------------------------
+# Daily pg_dump (custom format) at 03:15 Asia/Taipei into the litellm-backups
+# PVC, keeping 14 days. The dump is ciphertext for provider credentials without
+# LITELLM_SALT_KEY - back that key up outside the cluster.
+# The job waits for pg_isready first: a fresh pod can race the NetworkPolicy
+# controller and be refused on its first connection.
+# Run one now:
+#   kubectl --context woow-k3s -n litellm create job backup-$(date +%s) --from=cronjob/litellm-postgres-backup
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-backups
+  namespace: litellm
+  labels:
+    app.kubernetes.io/part-of: woow-litellm
+    app: litellm-backup
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-postgres-backup
+  namespace: litellm
+  labels:
+    app.kubernetes.io/part-of: woow-litellm
+    app: litellm-backup
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
+spec:
+  schedule: 15 3 * * *
+  timeZone: Asia/Taipei
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: litellm-backup
+            app.kubernetes.io/part-of: woow-litellm
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: pg-dump
+            image: docker.io/library/postgres:16-alpine
+            envFrom:
+            - secretRef:
+                name: litellm-postgres-secret
+            command:
+            - sh
+            - -c
+            - |
+              set -eu
+              i=0; until pg_isready -h litellm-postgres -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+                i=$$((i+1)); [ "$$i" -ge 20 ] && { echo 'postgres unreachable after 60s' >&2; exit 1; }; sleep 3
+              done
+              f=/backup/litellm-$$(date +%Y%m%d-%H%M%S).dump
+              PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h litellm-postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-privileges -f "$f.tmp"
+              mv "$f.tmp" "$f"
+              find /backup -name 'litellm-*.dump' -mtime +14 -delete
+              find /backup -name 'litellm-*.dump.tmp' -mmin +60 -delete
+              ls -l /backup
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+          volumes:
+          - name: backup
+            persistentVolumeClaim:
+              claimName: litellm-backups

@@ -1,8 +1,8 @@
 # -----------------------------------------------------------------------------
-# ConfigMap wrapping the shared config/config.yaml.
-# KEEP THIS IN SYNC with config/config.yaml — the data key below must be a
-# byte-for-byte copy of that file's content. Mounted into the litellm pod at
-# /etc/litellm/config.yaml (see 04-litellm-deployment.yaml).
+# ConfigMap wrapping config/config.yaml. The data key MUST be a byte-for-byte
+# copy of config/config.yaml - CI (.github/workflows/lint.yml) fails otherwise.
+# A ConfigMap change does not restart the pod:
+#   kubectl --context woow-k3s -n litellm rollout restart deploy/litellm
 # -----------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
@@ -10,7 +10,10 @@ metadata:
   name: litellm-config
   namespace: litellm
   labels:
+    app.kubernetes.io/part-of: woow-litellm
     app: litellm
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
 data:
   config.yaml: |
     # =============================================================================

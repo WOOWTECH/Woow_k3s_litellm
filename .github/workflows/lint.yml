@@ -1,0 +1,63 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: YAML parses
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import glob, yaml
+          files = glob.glob("k8s/*.yaml") + glob.glob("examples/*.yaml") + ["config/config.yaml"]
+          for f in files:
+              list(yaml.safe_load_all(open(f)))
+              print("ok", f)
+          EOF
+
+      - name: ConfigMap is a byte-for-byte copy of config/config.yaml
+        run: |
+          python3 - <<'EOF'
+          import yaml, sys
+          cm = next(d for d in yaml.safe_load_all(open("k8s/03-litellm-config.yaml")) if d and d["kind"] == "ConfigMap")
+          if cm["data"]["config.yaml"] != open("config/config.yaml").read():
+              sys.exit("k8s/03-litellm-config.yaml is out of sync with config/config.yaml")
+          print("in sync")
+          EOF
+
+      - name: No Secrets in k8s/, placeholders only in examples/
+        run: |
+          python3 - <<'EOF'
+          import glob, yaml, sys
+          bad = []
+          for f in glob.glob("k8s/*.yaml"):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and d["kind"] == "Secret":
+                      bad.append(f"{f}: Secret/{d['metadata']['name']} must live in examples/, not k8s/")
+          for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
+              if not d:
+                  continue
+              for k, v in (d.get("stringData") or {}).items():
+                  fixed = k in ("POSTGRES_USER", "POSTGRES_DB", "LITELLM_BASE_URL")
+                  if not fixed and "REPLACE_ME" not in str(v):
+                      bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
+              if d.get("data"):
+                  bad.append(f"examples: {d['metadata']['name']} uses base64 data; use stringData placeholders")
+          if bad:
+              sys.exit("\n".join(bad))
+          print("no secrets committed")
+          EOF
+
+      - name: Kubernetes schema (kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary k8s/ examples/
+
+      - name: Shell scripts parse
+        run: bash -n scripts/*.sh

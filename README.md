@@ -1,293 +1,194 @@
-# woow_litellm_docker_compose
+# Woow_k3s_litellm — LiteLLM Gateway on K3s
 
-A production LiteLLM gateway for WoowTech that fronts multiple LLM families
-through a single OpenAI-compatible API. Every model is routed via
-**OpenRouter** (`openrouter/<provider>/<model>`), keys and budgets are governed
-centrally, models and virtual keys persist in Postgres, and a **Claude Code
-Skill Hub** is exposed for skill/plugin discovery.
+[中文說明](README_zh-TW.md)
 
-The same shared `config/config.yaml` drives two deployment modes:
+The WoowTech LiteLLM gateway: one OpenAI-compatible API in front of multiple
+LLM families, all routed through **OpenRouter**. Postgres stores virtual keys,
+budgets, spend and UI-added models. A Cloudflare Tunnel publishes the gateway
+and its MCP admin console, and a daily `pg_dump` CronJob backs up the database.
 
-- **k3s** — the live production instance, reachable at
-  **https://litellm.woowtech.io** via a Cloudflare tunnel.
-- **docker-compose** — a self-contained local stack (LiteLLM + Postgres) for
-  development and testing.
+The manifests in `k8s/` are exactly what runs on the **woow-k3s** cluster
+(kubectl context `woow-k3s`). `scripts/check-drift.sh` proves it.
 
-> Live instance: **https://litellm.woowtech.io**
-> Readiness: `https://litellm.woowtech.io/health/readiness`
+| Endpoint | URL |
+|---|---|
+| Gateway API (`/v1/*`) | https://litellm.woowtech.io |
+| Admin UI (user `admin`, password = master key) | https://litellm.woowtech.io/ui |
+| Readiness (DB-aware, no auth) | https://litellm.woowtech.io/health/readiness |
+| MCP admin console | https://litellm-mcp.woowtech.io |
 
 ---
 
 ## Architecture
 
 ```
-                          ┌───────────────────────────────┐
-   Clients (OpenAI SDK,   │        OpenRouter            │
-   Claude Code, curl)     │  openai/ z-ai/ minimax/ ...  │
-        │                 └──────────────▲───────────────┘
-        │  Bearer sk-...                  │ openrouter/<provider>/<model>
-        ▼                                 │  (OPENROUTER_API_KEY from env)
-┌──────────────────┐   Cloudflare   ┌────┴──────────────────┐
-│ litellm.woowtech  │◄── tunnel ────►│  LiteLLM proxy     │
-│ .io (public)      │                │  Service litellm   │
-└──────────────────┘                │  :4000  (/ui, /v1) │
-                                     └────┬───────────────┘
-                                          │ DATABASE_URL
-                                          ▼
-                                 ┌────────────────────┐
-                                 │ Postgres           │
-                                 │ (models, keys,     │
-                                 │  budgets, spend)   │
-                                 └────────────────────┘
+ Clients (OpenAI SDK, Claude Code, curl)
+        │ Bearer sk-...
+        ▼
+ Cloudflare ── tunnel ──► cloudflared ×2 ─────────────┐  (ns litellm)
+                            │ litellm.woowtech.io      │ litellm-mcp.woowtech.io
+                            ▼                          ▼
+                     litellm :4000              litellm-mcp-admin :8080  (ns litellm-mcp)
+                       │        │                      │
+        openrouter.ai ◄┘        │ DATABASE_URL         └──► litellm.litellm.svc:4000
+                                ▼
+                     litellm-postgres :5432  ◄── NetworkPolicy: only app=litellm / app=litellm-backup
+                       │ Longhorn 5Gi (Retain)
+                       ▼
+                     litellm-postgres-backup (CronJob 03:15 Asia/Taipei) ──► litellm-backups PVC (14 days)
 ```
 
-- **LiteLLM proxy** (`ghcr.io/berriai/litellm:v1.83.14-stable`) listens on port
-  `4000`, serves the OpenAI-compatible `/v1/*` API and the Admin UI at `/ui`.
-- **OpenRouter** is the single upstream provider. Each public model name maps to
-  a verified OpenRouter slug; the API key is read from
-  `os.environ/OPENROUTER_API_KEY` and is never hardcoded.
-- **Postgres** persists models (`store_model_in_db: true`), virtual keys,
-  budgets and spend. `/health/readiness` returns healthy only when the DB is
-  connected.
-- **Cloudflare tunnel** publishes the internal `litellm:4000` Service as
-  `https://litellm.woowtech.io`. The tunnel routing is managed in Cloudflare and
-  must stay untouched; the k8s `cloudflared` Deployment only runs the connector.
+| Component | Kind | Image |
+|---|---|---|
+| `litellm` | Deployment + Service :4000 | `ghcr.io/berriai/litellm:v1.83.14-stable` |
+| `litellm-postgres` | StatefulSet + headless Service :5432 | `docker.io/library/postgres:16-alpine` |
+| `cloudflared` | Deployment ×2 | `cloudflare/cloudflared:latest` |
+| `litellm-postgres-backup` | CronJob + PVC | `docker.io/library/postgres:16-alpine` |
+| `litellm-mcp-admin` | Deployment + Service :8080 + PVC | built from [Woow_litellm_mcp_server](https://github.com/WOOWTECH/Woow_litellm_mcp_server) |
 
----
+## Models
+
+All models go through OpenRouter (`api_key: os.environ/OPENROUTER_API_KEY`):
+
+| Public model name | OpenRouter model |
+|---|---|
+| `gpt-4o-mini` | `openrouter/openai/gpt-4o-mini` |
+| `glm-4.6` | `openrouter/z-ai/glm-4.6` |
+| `minimax-m2` | `openrouter/minimax/minimax-m2` |
+| `claude-sonnet-4.5` | `openrouter/anthropic/claude-sonnet-4.5` |
+| `llama-3.3-70b` | `openrouter/meta-llama/llama-3.3-70b-instruct` |
+
+More models can be added in the Admin UI (`store_model_in_db: true`). Before
+adding an `anthropic/*` slug, check it against
+`GET https://openrouter.ai/api/v1/models`, because OpenRouter retires old slugs.
 
 ## Repository layout
 
 ```
-.
-├── docker-compose.yml          # Local stack: LiteLLM + Postgres
-├── .env.example                # Placeholder env (copy to .env, fill real keys)
-├── config/
-│   └── config.yaml             # SHARED LiteLLM config (compose + k8s)
-├── k8s/
-│   ├── 00-namespace.yaml       # namespace: litellm
-│   ├── 01-secrets.example.yaml # PLACEHOLDER Secrets (never commit real values)
-│   ├── 02-postgres.yaml        # headless Service + StatefulSet (5Gi PVC)
-│   ├── 03-litellm-config.yaml  # ConfigMap wrapping config/config.yaml
-│   ├── 04-litellm-deployment.yaml # Deployment (app=litellm) + Service :4000
-│   └── 05-cloudflared.yaml     # Cloudflare tunnel connector
-├── tests/                      # TDD acceptance suite (see below)
-└── README.md
+config/config.yaml            LiteLLM config (single source; embedded in k8s/03)
+k8s/00-namespaces.yaml        litellm, litellm-mcp
+k8s/02-postgres.yaml          headless Service, StatefulSet, NetworkPolicy
+k8s/03-litellm-config.yaml    ConfigMap = config/config.yaml (CI-enforced)
+k8s/04-litellm-deployment.yaml proxy Deployment + Service
+k8s/05-cloudflared.yaml       tunnel connector
+k8s/06-backup.yaml            backup PVC + CronJob
+k8s/10-litellm-mcp.yaml       MCP admin console
+examples/secrets.example.yaml all 5 Secrets, placeholders only (kept OUT of k8s/)
+scripts/check-drift.sh        kubectl diff k8s/ against the cluster
+tests/acceptance.py           API acceptance suite (runs inside the litellm pod)
 ```
 
-> **Config sync note:** `k8s/03-litellm-config.yaml` embeds a byte-for-byte copy
-> of `config/config.yaml` inside a ConfigMap. When you change one, update the
-> other.
+## Deploy
 
----
-
-## Models
-
-All models are served through OpenRouter. Public name → OpenRouter slug:
-
-| Public model name    | OpenRouter model string                       |
-| -------------------- | --------------------------------------------- |
-| `gpt-4o-mini`        | `openrouter/openai/gpt-4o-mini`               |
-| `glm-4.6`            | `openrouter/z-ai/glm-4.6`                      |
-| `minimax-m2`         | `openrouter/minimax/minimax-m2`               |
-| `claude-3.5-sonnet`  | `openrouter/anthropic/claude-3.5-sonnet`      |
-| `llama-3.3-70b`      | `openrouter/meta-llama/llama-3.3-70b-instruct`|
-
-List them live with `GET /v1/models` (Bearer master key). New models can also be
-added at runtime from the Admin UI (`/ui`) and are persisted to Postgres via
-`store_model_in_db: true`.
-
----
-
-## Quickstart — docker-compose (local)
-
-Requirements: Docker + Docker Compose.
+Always pass `--context` explicitly.
 
 ```bash
-# 1. Copy the placeholder env and fill in REAL values
-cp .env.example .env
-#    Edit .env and set at least:
-#      OPENROUTER_API_KEY   (sk-or-...)
-#      LITELLM_MASTER_KEY   (sk-...)
-#      LITELLM_SALT_KEY     (sk-...   set once, NEVER change)
-#    DATABASE_URL is preset for the bundled Postgres service.
+# 1. Namespaces
+kubectl --context woow-k3s apply -f k8s/00-namespaces.yaml
 
-# 2. Bring up LiteLLM + Postgres
-docker compose up -d
+# 2. Secrets: copy OUTSIDE the repo, fill every REPLACE_ME, apply that copy
+cp examples/secrets.example.yaml /secure/path/secrets.yaml
+kubectl --context woow-k3s apply -f /secure/path/secrets.yaml
 
-# 3. Wait for readiness, then smoke-test (uses your master key)
-curl -s http://localhost:4000/health/readiness
-curl -s http://localhost:4000/v1/models \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+# 3. Everything else (safe: k8s/ contains no Secrets)
+kubectl --context woow-k3s apply -f k8s/
 
-# 4. A chat completion via OpenRouter
-curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+# 4. Wait for it (first boot runs the Prisma migrations, about 2 minutes)
+kubectl --context woow-k3s -n litellm rollout status deploy/litellm --timeout=10m
+kubectl --context woow-k3s -n litellm-mcp rollout status deploy/litellm-mcp-admin --timeout=10m
 ```
 
-Validate the compose file without starting anything:
+The tunnel's hostname routing is managed in Cloudflare, not in this repo:
+
+| Hostname | Service (must keep these names) |
+|---|---|
+| `litellm.woowtech.io` | `http://litellm:4000` |
+| `litellm-mcp.woowtech.io` | `http://litellm-mcp-admin.litellm-mcp.svc.cluster.local:8080` |
+
+**Only one deployment may run the tunnel token.** A second set of connectors
+joins the same tunnel and Cloudflare splits traffic between them.
+
+### Changing models or settings
 
 ```bash
-docker compose -f docker-compose.yml config
+$EDITOR config/config.yaml            # then copy the same content into k8s/03-litellm-config.yaml
+kubectl --context woow-k3s apply -f k8s/03-litellm-config.yaml
+kubectl --context woow-k3s -n litellm rollout restart deploy/litellm   # a ConfigMap change alone does not restart
 ```
 
----
-
-## Quickstart — k3s (production shape)
-
-Requirements: `kubectl` against your cluster.
+## Verify
 
 ```bash
-# 1. Namespace
-kubectl apply -f k8s/00-namespace.yaml
+curl -s https://litellm.woowtech.io/health/readiness     # {"status":"healthy","db":"connected",...}
 
-# 2. Secrets — copy the example, fill REAL values, apply from a PRIVATE copy.
-#    NEVER commit the filled-in file.
-cp k8s/01-secrets.example.yaml /tmp/01-secrets.yaml
-#    Replace every REPLACE_ME_* value:
-#      litellm-secrets:          OPENROUTER_API_KEY, LITELLM_MASTER_KEY,
-#                                LITELLM_SALT_KEY, DATABASE_URL
-#      litellm-postgres-secret:  POSTGRES_PASSWORD (match DATABASE_URL)
-#      cloudflared-token:        TUNNEL_TOKEN (existing tunnel)
-kubectl apply -f /tmp/01-secrets.yaml
+# Full acceptance suite, run inside the pod with the pod's own master key
+kubectl --context woow-k3s -n litellm exec -i deploy/litellm -c litellm -- \
+  sh -c 'MASTER_KEY="$LITELLM_MASTER_KEY" python -' < tests/acceptance.py
 
-# 3. Postgres, config, proxy, tunnel connector
-kubectl apply -f k8s/02-postgres.yaml
-kubectl apply -f k8s/03-litellm-config.yaml
-kubectl apply -f k8s/04-litellm-deployment.yaml
-kubectl apply -f k8s/05-cloudflared.yaml
-
-# 4. Verify
-kubectl -n litellm get pods
-kubectl -n litellm exec deploy/litellm -c litellm -- \
-  python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:4000/health/readiness').read().decode())"
+# Repo vs cluster (exit 0 = identical)
+scripts/check-drift.sh
 ```
 
-Notes:
+`acceptance.py` makes real model calls, which cost OpenRouter credits. It also
+leaves a budget-limited virtual key and a `grill-me` plugin in the database.
+See [tests/README.md](tests/README.md).
 
-- `DISABLE_SCHEMA_UPDATE=true` on the proxy pods keeps them from running DB
-  migrations (restart / multi-replica safe).
-- `LITELLM_SALT_KEY` encrypts provider credentials stored in the DB — **set it
-  once and never rotate it**, or stored credentials become undecryptable.
-- The Cloudflare tunnel and its hostname mapping are managed in Cloudflare; the
-  `cloudflared` Deployment only runs the connector using the token Secret.
+## Backup and restore
 
----
+- The `litellm-postgres-backup` CronJob runs `pg_dump -Fc` at 03:15 Asia/Taipei
+  into the `litellm-backups` PVC and keeps 14 days.
+- To run a backup now:
+  `kubectl --context woow-k3s -n litellm create job backup-$(date +%s) --from=cronjob/litellm-postgres-backup`
+- **`LITELLM_SALT_KEY` must be backed up outside the cluster.** Provider
+  credentials in the dump are encrypted with it. Rotating or losing the key
+  makes them undecryptable, and LiteLLM fails silently when that happens.
 
-## Virtual keys & governance
-
-The master key (`LITELLM_MASTER_KEY`) is the admin credential. For everyday use,
-issue **virtual keys** with budgets and model restrictions instead of handing out
-the master key.
-
-Create a scoped virtual key:
+Restore. This procedure has not been exercised yet, so rehearse it before you
+need it:
 
 ```bash
-curl -s http://localhost:4000/key/generate \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"models":["gpt-4o-mini"],"max_budget":5,"key_alias":"demo"}'
-# -> {"key":"sk-...", ...}
+C="--context woow-k3s -n litellm"
+kubectl $C scale deploy/litellm --replicas=0
+kubectl $C run pg-restore --rm -i --restart=Never --image=docker.io/library/postgres:16-alpine \
+  --labels=app=litellm-backup \
+  --overrides='{"spec":{"volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"litellm-backups"}}],
+    "containers":[{"name":"pg-restore","image":"docker.io/library/postgres:16-alpine","stdin":true,
+    "envFrom":[{"secretRef":{"name":"litellm-postgres-secret"}}],
+    "volumeMounts":[{"name":"b","mountPath":"/backup"}],
+    "command":["sh","-c","ls -l /backup; PGPASSWORD=$POSTGRES_PASSWORD pg_restore -h litellm-postgres -U $POSTGRES_USER -d $POSTGRES_DB --clean --if-exists --no-owner /backup/litellm-YYYYmmdd-HHMMSS.dump"]}]}}'
+kubectl $C scale deploy/litellm --replicas=1
 ```
 
-The returned `sk-...` key:
+## Design decisions
 
-- can call the models listed in `models` (e.g. `gpt-4o-mini`),
-- is **blocked** from any model not in that list (returns an auth/permission
-  error),
-- stops working once it exceeds `max_budget`.
+These settings combine the original k3s manifests, the spec that ran in
+production, and the single-host port
+[Woow_podman_litellm](https://github.com/WOOWTECH/Woow_podman_litellm):
 
-Keys, budgets and spend are persisted in Postgres, and everything is also
-manageable from the Admin UI at **`/ui`** (log in with the master key).
+| Setting | Why |
+|---|---|
+| `DISABLE_SCHEMA_UPDATE=false` | With `true`, an empty database never gets its tables. The original manifests set `true`, but that value never ran in production |
+| `startupProbe` 40×15s | Gives first-boot migrations up to 10 minutes. Afterwards readiness and liveness use 10s timeouts instead of `initialDelaySeconds` |
+| `pg_isready` initContainer | A bare TCP check passes while Postgres is still initialising |
+| `RollingUpdate maxUnavailable 0 / maxSurge 1` | No gap during rollouts. Only the new pod migrates |
+| NetworkPolicy on Postgres | The database holds every key and encrypted credential |
+| `pg_isready` wait in the backup job | On woow-k3s a fresh pod can race the NetworkPolicy controller |
+| cloudflared `--metrics 0.0.0.0:2000` | Pins the port the `/ready` probes use |
+| Longhorn `Retain` | Deleting a PVC does not delete the data |
 
----
+## History
 
-## Skill Hub (Claude Code plugins)
+- **2026-07-23**: first deployed on the local laptop cluster (context `default`) using `local-path` storage.
+- **2026-08-04**: this repo was written as `Woow_litellm_docker_compose`. Its manifests drifted from what was running and were never applied, apart from the 2026-08-05 model fix.
+- **2026-09-11**: the local cluster lost its nodes and the `local-path` database was lost with them. The gateway was redeployed on woow-k3s from the merged spec with an **empty database**: models and master key unchanged, old virtual keys and spend history gone. The repo was renamed `Woow_k3s_litellm`, and the docker-compose files were removed in favour of Woow_podman_litellm.
 
-This LiteLLM version exposes a Claude Code **Skill Hub / plugin registry**, so
-Claude Code clients can discover skills served by the gateway.
+## Related repositories
 
-Endpoints:
-
-| Method & path                                | Auth        | Purpose                          |
-| -------------------------------------------- | ----------- | -------------------------------- |
-| `POST /claude-code/plugins`                  | master key  | register a skill/plugin          |
-| `GET  /claude-code/plugins`                  | master key  | list registered plugins          |
-| `GET  /claude-code/plugins/{plugin_name}`    | master key  | get one                          |
-| `DELETE /claude-code/plugins/{plugin_name}`  | master key  | delete                           |
-| `POST /claude-code/plugins/{name}/enable`    | master key  | enable                           |
-| `POST /claude-code/plugins/{name}/disable`   | master key  | disable                          |
-| `GET  /claude-code/marketplace.json`         | public      | marketplace manifest             |
-| `GET  /public/skill_hub`                      | public      | public skill hub listing         |
-
-Register a skill (required fields are `name` and `source`):
-
-```bash
-curl -s -X POST http://localhost:4000/claude-code/plugins \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "name": "grill-me",
-        "source": {"source": "github", "repo": "anthropics/skills"},
-        "description": "Interview skill",
-        "domain": "Productivity",
-        "namespace": "skills"
-      }'
-
-# then list / discover
-curl -s http://localhost:4000/claude-code/plugins \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY"
-curl -s http://localhost:4000/claude-code/marketplace.json
-```
-
-`source` supports `github` (`{"source":"github","repo":"org/repo"}`), `url`
-(`{"source":"url","url":"https://.../repo.git"}`) and `git-subdir`
-(`{...,"path":"plugins/name"}`).
-
----
-
-## Test suite (TDD acceptance)
-
-The `tests/` directory holds the acceptance suite that must go green against a
-running instance. It exercises three areas:
-
-**A — Core gateway + persistence**
-- `A1` `/health/readiness` → status healthy **and** DB connected.
-- `A2` `/v1/models` (Bearer master key) lists the OpenRouter-backed models.
-- `A3` chat completions return real non-empty content for `gpt-4o-mini`,
-  `glm-4.6`, `minimax-m2` via OpenRouter.
-- `A4` persistence sanity: DB connected and `store_model_in_db: true`.
-- `A5` `docker-compose.yml` is schema-valid.
-
-**B — Key governance + external**
-- `B1` create a virtual key via `POST /key/generate` with `max_budget` + model
-  restriction; response contains an `sk-` key.
-- `B2` that key can call an allowed model and is blocked from a non-allowed one.
-- `B3` external tunnel: `https://litellm.woowtech.io/health/readiness` → healthy.
-- `B4` Admin UI reachable: `GET /ui` → HTTP 200.
-
-**C — Skill Hub**
-- `C1` register a Claude Code skill and confirm it is listed.
-- `C2` `GET /claude-code/marketplace.json` is retrievable.
-
-Because the gateway calls out to OpenRouter, tests need a valid
-`OPENROUTER_API_KEY` in the environment (the proxy reads it from its Secret /
-`.env`). Against the k3s instance, API tests run **inside** a litellm pod using
-Python's `urllib` (the image ships Python but not `curl`), while the external
-tunnel check is done against the public URL.
-
----
+- [Woow_podman_litellm](https://github.com/WOOWTECH/Woow_podman_litellm): the same stack on a single host with rootless Podman (compose or Quadlet)
+- [Woow_litellm_mcp_server](https://github.com/WOOWTECH/Woow_litellm_mcp_server): source of the MCP admin console
 
 ## Security
 
-- **No real secrets are committed to this repository.** `.env.example` and
-  `k8s/01-secrets.example.yaml` contain **placeholders only**.
-- The OpenRouter key, master key, salt key and database URL are always read from
-  the environment (`os.environ/...`) or a k8s Secret — never hardcoded in
-  `config/config.yaml`.
-- Copy the example files to a private location, fill real values there, and keep
-  the filled-in `.env` / secret manifests out of version control.
-- Distribute scoped **virtual keys** (with budgets and model allow-lists) to
-  users instead of the master key.
-- `LITELLM_SALT_KEY` must be set once and never rotated.
+- No real secret is committed. `examples/secrets.example.yaml` holds placeholders, and `.gitignore` blocks secret-shaped files.
+- All keys are read from Secrets (`os.environ/...`), never from `config/config.yaml`.
+- Give users scoped virtual keys (`POST /key/generate` with `models` and `max_budget`), never the master key.

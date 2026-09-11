@@ -1,11 +1,11 @@
 # -----------------------------------------------------------------------------
-# Cloudflared tunnel connector for https://litellm.woowtech.io
-#
-# NOTE: This REUSES the EXISTING Cloudflare tunnel. The tunnel routing (public
-# hostname -> http://litellm:4000) is configured in the Cloudflare dashboard /
-# existing tunnel config and must stay untouched. This Deployment only runs the
-# connector using the token from the cloudflared-token Secret. Do not create a
-# new tunnel or change the hostname mapping.
+# Cloudflare Tunnel connector (2 replicas, spread across nodes).
+# The tunnel is remote-managed in Cloudflare; its ingress rules are:
+#   litellm.woowtech.io     -> http://litellm:4000
+#   litellm-mcp.woowtech.io -> http://litellm-mcp-admin.litellm-mcp.svc.cluster.local:8080
+# so the namespace and Service names in this repo must not change.
+# --metrics 0.0.0.0:2000 pins the listener the /ready probes target.
+# Only ONE deployment may run this token; a second set of connectors splits traffic.
 # -----------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
@@ -13,9 +13,12 @@ metadata:
   name: cloudflared
   namespace: litellm
   labels:
+    app.kubernetes.io/part-of: woow-litellm
     app: cloudflared
+  annotations:
+    woowtech.io/source: 'merged: Woow_litellm_docker_compose@bebf782 + live k3s spec (2026-07-23) + Woow_podman_litellm@8a478d3'
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: cloudflared
@@ -23,31 +26,49 @@ spec:
     metadata:
       labels:
         app: cloudflared
+        app.kubernetes.io/part-of: woow-litellm
     spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: cloudflared
       containers:
-        - name: cloudflared
-          image: cloudflare/cloudflared:latest
-          args:
-            - tunnel
-            - --no-autoupdate
-            - run
-          env:
-            - name: TUNNEL_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: cloudflared-token
-                  key: TUNNEL_TOKEN
-          livenessProbe:
-            httpGet:
-              path: /ready
-              port: 2000
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+        - tunnel
+        - --no-autoupdate
+        - --metrics
+        - 0.0.0.0:2000
+        - run
+        env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cloudflared-token
+              key: TUNNEL_TOKEN
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          initialDelaySeconds: 20
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
