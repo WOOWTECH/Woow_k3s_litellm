@@ -1,0 +1,23 @@
+LiteLLM gateway ({{ .Chart.AppVersion }}) - release {{ .Release.Name }}
+
+Namespaces: {{ include "litellm.ns" . }}{{ if .Values.mcp.enabled }}, {{ include "litellm.mcpNs" . }}{{ end }}
+{{- if not .Values.secrets.create }}
+
+Secrets are NOT managed by this release (secrets.create=false). They must
+already exist: see examples/secrets.example.yaml.
+{{- end }}
+
+Wait for first boot (runs the database migrations):
+  kubectl -n {{ include "litellm.ns" . }} rollout status deploy/litellm --timeout=10m
+
+Verify:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if .Values.cloudflared.enabled }}
+  curl -s https://litellm.woowtech.io/health/readiness
+{{- else }}
+
+cloudflared is disabled: the gateway is only reachable in-cluster at
+  {{ include "litellm.baseUrl" . }}
+{{- end }}
+
+Back up LITELLM_SALT_KEY outside the cluster. Database dumps are useless without it.

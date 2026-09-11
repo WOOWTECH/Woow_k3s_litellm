@@ -1,0 +1,80 @@
+{{- /*
+Daily pg_dump (custom format) into the litellm-backups PVC.
+The dump is ciphertext for provider credentials without LITELLM_SALT_KEY.
+The job waits for pg_isready first: a fresh pod can race the NetworkPolicy
+controller and be refused on its first connection.
+("$$" is Kubernetes' escape for a literal "$" in command strings.)
+*/ -}}
+{{- if .Values.backup.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-backups
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app: litellm-backup
+  {{- include "litellm.keepAnnotations" . | nindent 2 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ include "litellm.storageClass" (list . .Values.backup.storage.className) }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-postgres-backup
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app: litellm-backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: {{ .Values.backup.timeZone }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: litellm-backup
+            {{- include "litellm.partOf" . | nindent 12 }}
+        spec:
+          # Never (not OnFailure) so a failed pod and its logs survive.
+          restartPolicy: Never
+          containers:
+            - name: pg-dump
+              image: {{ include "litellm.postgresImage" . }}
+              envFrom:
+                - secretRef:
+                    name: litellm-postgres-secret
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  i=0; until pg_isready -h litellm-postgres -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+                    i=$$((i+1)); [ "$$i" -ge 20 ] && { echo 'postgres unreachable after 60s' >&2; exit 1; }; sleep 3
+                  done
+                  f=/backup/litellm-$$(date +%Y%m%d-%H%M%S).dump
+                  PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h litellm-postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-privileges -f "$f.tmp"
+                  mv "$f.tmp" "$f"
+                  find /backup -name 'litellm-*.dump' -mtime +{{ .Values.backup.retentionDays }} -delete
+                  find /backup -name 'litellm-*.dump.tmp' -mmin +60 -delete
+                  ls -l /backup
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: litellm-backups
+{{- end }}

@@ -5,7 +5,12 @@
 secrets.yaml
 *-secrets.yaml
 *.secret.yaml
+*secrets.values.yaml
+*.local.yaml
 
 # Database dumps contain every virtual key and encrypted credential.
 *.dump
 backups/
+
+# Packaged charts
+*.tgz

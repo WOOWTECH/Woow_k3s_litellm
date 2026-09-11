@@ -1,0 +1,115 @@
+{{- /*
+PostgreSQL 16: virtual keys, budgets, spend, UI-added models and provider
+credentials encrypted with LITELLM_SALT_KEY.
+- Headless Service: DATABASE_URL uses host litellm-postgres:5432.
+- PGDATA is a subdir because the ext4 volume root holds lost+found.
+- The probes hardcode user and database "litellm".
+- 90s grace period so Postgres checkpoints instead of being killed.
+- volumeClaimTemplates is immutable: keep its shape exactly as deployed.
+*/ -}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-postgres
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app: litellm-postgres
+spec:
+  clusterIP: None
+  selector:
+    app: litellm-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-postgres
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app: litellm-postgres
+spec:
+  serviceName: litellm-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-postgres
+  template:
+    metadata:
+      labels:
+        app: litellm-postgres
+        {{- include "litellm.partOf" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: postgres
+          image: {{ include "litellm.postgresImage" . }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: litellm-postgres-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, litellm, -d, litellm]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, litellm, -d, litellm]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+        labels:
+          app: litellm-postgres
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ include "litellm.storageClass" (list . .Values.postgres.storage.className) }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage.size }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: litellm-postgres-ingress
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: litellm-postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: litellm
+        - podSelector:
+            matchLabels:
+              app: litellm-backup
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

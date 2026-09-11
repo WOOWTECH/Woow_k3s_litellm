@@ -1,4 +1,4 @@
-# Woow_k3s_litellm — LiteLLM Gateway on K3s
+# Woow_k3s_litellm — LiteLLM Gateway Helm Chart
 
 [中文說明](README_zh-TW.md)
 
@@ -7,8 +7,9 @@ LLM families, all routed through **OpenRouter**. Postgres stores virtual keys,
 budgets, spend and UI-added models. A Cloudflare Tunnel publishes the gateway
 and its MCP admin console, and a daily `pg_dump` CronJob backs up the database.
 
-The manifests in `k8s/` are exactly what runs on the **woow-k3s** cluster
-(kubectl context `woow-k3s`). `scripts/check-drift.sh` proves it.
+This chart is what runs on the **woow-k3s** cluster (kubectl context `woow-k3s`)
+as Helm release `litellm` in namespace `litellm`. Its default values reproduce
+that deployment 1:1, and `scripts/check-drift.sh` proves it.
 
 | Endpoint | URL |
 |---|---|
@@ -38,17 +39,22 @@ The manifests in `k8s/` are exactly what runs on the **woow-k3s** cluster
                      litellm-postgres-backup (CronJob 03:15 Asia/Taipei) ──► litellm-backups PVC (14 days)
 ```
 
-| Component | Kind | Image |
+| Template | Objects | Toggle |
 |---|---|---|
-| `litellm` | Deployment + Service :4000 | `ghcr.io/berriai/litellm:v1.83.14-stable` |
-| `litellm-postgres` | StatefulSet + headless Service :5432 | `docker.io/library/postgres:16-alpine` |
-| `cloudflared` | Deployment ×2 | `cloudflare/cloudflared:latest` |
-| `litellm-postgres-backup` | CronJob + PVC | `docker.io/library/postgres:16-alpine` |
-| `litellm-mcp-admin` | Deployment + Service :8080 + PVC | built from [Woow_litellm_mcp_server](https://github.com/WOOWTECH/Woow_litellm_mcp_server) |
+| `templates/litellm.yaml` | ConfigMap (from `config/config.yaml`), Deployment, Service :4000 | always |
+| `templates/postgres.yaml` | headless Service, StatefulSet, NetworkPolicy | `networkPolicy.enabled` |
+| `templates/cloudflared.yaml` | Deployment ×2 | `cloudflared.enabled` |
+| `templates/backup.yaml` | PVC, CronJob | `backup.enabled` |
+| `templates/mcp.yaml` | PVC, Deployment, Service :8080 (ns `litellm-mcp`) | `mcp.enabled` |
+| `templates/secrets.yaml` | the 5 Secrets | `secrets.create` |
+| `templates/namespace.yaml` | Namespaces other than the release namespace | `namespace.create` |
+| `templates/tests/smoke.yaml` | `helm test` pod | `tests.enabled` |
 
 ## Models
 
-All models go through OpenRouter (`api_key: os.environ/OPENROUTER_API_KEY`):
+All models go through OpenRouter (`api_key: os.environ/OPENROUTER_API_KEY`).
+They are defined in `config/config.yaml`, which the chart reads directly, so
+there is no second copy to keep in sync.
 
 | Public model name | OpenRouter model |
 |---|---|
@@ -62,76 +68,124 @@ More models can be added in the Admin UI (`store_model_in_db: true`). Before
 adding an `anthropic/*` slug, check it against
 `GET https://openrouter.ai/api/v1/models`, because OpenRouter retires old slugs.
 
-## Repository layout
+## Quick start
 
-```
-config/config.yaml            LiteLLM config (single source; embedded in k8s/03)
-k8s/00-namespaces.yaml        litellm, litellm-mcp
-k8s/02-postgres.yaml          headless Service, StatefulSet, NetworkPolicy
-k8s/03-litellm-config.yaml    ConfigMap = config/config.yaml (CI-enforced)
-k8s/04-litellm-deployment.yaml proxy Deployment + Service
-k8s/05-cloudflared.yaml       tunnel connector
-k8s/06-backup.yaml            backup PVC + CronJob
-k8s/10-litellm-mcp.yaml       MCP admin console
-examples/secrets.example.yaml all 5 Secrets, placeholders only (kept OUT of k8s/)
-scripts/check-drift.sh        kubectl diff k8s/ against the cluster
-tests/acceptance.py           API acceptance suite (runs inside the litellm pod)
-```
+Always pass the context explicitly (`--kube-context` for helm, `--context` for kubectl).
 
-## Deploy
+### A. Let the chart create the Secrets
 
-Always pass `--context` explicitly.
+Keep the values file with the real keys **outside** the repository:
 
 ```bash
-# 1. Namespaces
-kubectl --context woow-k3s apply -f k8s/00-namespaces.yaml
+cat > ~/secure/litellm-secrets.values.yaml <<EOF
+secrets:
+  create: true
+  openrouterApiKey: sk-or-...                   # from OpenRouter
+  masterKey: sk-$(openssl rand -hex 32)
+  saltKey: sk-$(openssl rand -hex 32)           # set once, never rotate, back it up
+  postgresPassword: $(openssl rand -hex 24)     # letters and digits only
+  tunnelToken: <cloudflare tunnel token>
+  mcp:
+    adminPassword: $(openssl rand -hex 12)
+    mcpAuthToken: $(openssl rand -hex 24)
+    jwtSecret: $(openssl rand -hex 32)
+EOF
+chmod 600 ~/secure/litellm-secrets.values.yaml
 
-# 2. Secrets: copy OUTSIDE the repo, fill every REPLACE_ME, apply that copy
-cp examples/secrets.example.yaml /secure/path/secrets.yaml
-kubectl --context woow-k3s apply -f /secure/path/secrets.yaml
+# Install straight from the repo tarball (no clone needed)
+helm --kube-context woow-k3s install litellm \
+  https://github.com/WOOWTECH/Woow_k3s_litellm/archive/refs/heads/main.tar.gz \
+  -n litellm --create-namespace -f ~/secure/litellm-secrets.values.yaml
 
-# 3. Everything else (safe: k8s/ contains no Secrets)
-kubectl --context woow-k3s apply -f k8s/
-
-# 4. Wait for it (first boot runs the Prisma migrations, about 2 minutes)
-kubectl --context woow-k3s -n litellm rollout status deploy/litellm --timeout=10m
-kubectl --context woow-k3s -n litellm-mcp rollout status deploy/litellm-mcp-admin --timeout=10m
+# Or from a local clone
+git clone https://github.com/WOOWTECH/Woow_k3s_litellm.git && cd Woow_k3s_litellm
+helm --kube-context woow-k3s install litellm . -n litellm --create-namespace \
+  -f ~/secure/litellm-secrets.values.yaml
 ```
 
-The tunnel's hostname routing is managed in Cloudflare, not in this repo:
+Every later `helm upgrade` needs the same `-f` file. Without it, the
+`required` checks stop the upgrade; the keys are never silently blanked.
 
-| Hostname | Service (must keep these names) |
+### B. Manage the Secrets outside Helm (how woow-k3s runs)
+
+With the default `secrets.create=false`, the chart never renders or touches a
+Secret, so no upgrade can ever overwrite a real key.
+
+```bash
+kubectl --context woow-k3s create namespace litellm
+kubectl --context woow-k3s create namespace litellm-mcp
+cp examples/secrets.example.yaml ~/secure/secrets.yaml      # fill every REPLACE_ME
+kubectl --context woow-k3s apply -f ~/secure/secrets.yaml
+
+# --take-ownership adopts the litellm-mcp namespace created above
+helm --kube-context woow-k3s install litellm . -n litellm --take-ownership
+```
+
+### Then
+
+```bash
+# First boot runs the Prisma migrations (about 2 minutes)
+kubectl --context woow-k3s -n litellm rollout status deploy/litellm --timeout=10m
+helm --kube-context woow-k3s test litellm -n litellm --logs
+```
+
+The tunnel's hostname routing is managed in Cloudflare, not in this chart:
+
+| Hostname | Service (the chart keeps these names fixed) |
 |---|---|
 | `litellm.woowtech.io` | `http://litellm:4000` |
 | `litellm-mcp.woowtech.io` | `http://litellm-mcp-admin.litellm-mcp.svc.cluster.local:8080` |
 
 **Only one deployment may run the tunnel token.** A second set of connectors
-joins the same tunnel and Cloudflare splits traffic between them.
+joins the same tunnel and Cloudflare splits traffic between them. Set
+`cloudflared.enabled=false` for any test install.
 
-### Changing models or settings
+## Key values
 
-```bash
-$EDITOR config/config.yaml            # then copy the same content into k8s/03-litellm-config.yaml
-kubectl --context woow-k3s apply -f k8s/03-litellm-config.yaml
-kubectl --context woow-k3s -n litellm rollout restart deploy/litellm   # a ConfigMap change alone does not restart
-```
+| Value | Default | Description |
+|---|---|---|
+| `namespace.name` / `mcp.namespace` | `litellm` / `litellm-mcp` | Target namespaces |
+| `namespace.create` | `true` | Render Namespaces other than the release namespace |
+| `keepOnUninstall` | `true` | `helm.sh/resource-policy: keep` on Namespaces, PVCs and chart-created Secrets |
+| `storageClassName` | `longhorn` | Default StorageClass (Longhorn, reclaimPolicy Retain) |
+| `secrets.create` | `false` | Render the Secrets from `secrets.*` instead of using existing ones |
+| `litellm.image.tag` | `v1.83.14-stable` | LiteLLM version |
+| `litellm.logLevel` | `ERROR` | `LITELLM_LOG` |
+| `litellm.resources` | 250m/512Mi → 2/2Gi | Proxy requests/limits |
+| `postgres.storage.size` | `5Gi` | Database volume |
+| `cloudflared.enabled` / `replicas` | `true` / `2` | Tunnel connector |
+| `backup.enabled` / `schedule` / `retentionDays` | `true` / `15 3 * * *` / `14` | Daily `pg_dump` (Asia/Taipei) |
+| `mcp.enabled` / `mcp.gitRepo` | `true` / Woow_litellm_mcp_server | MCP admin console |
+| `tests.enabled` | `true` | `helm test` smoke pod |
+
+Full list: [`values.yaml`](values.yaml)
 
 ## Verify
 
 ```bash
-curl -s https://litellm.woowtech.io/health/readiness     # {"status":"healthy","db":"connected",...}
+helm --kube-context woow-k3s test litellm -n litellm --logs   # readiness, DB, models, MCP (read-only)
+curl -s https://litellm.woowtech.io/health/readiness
 
 # Full acceptance suite, run inside the pod with the pod's own master key
 kubectl --context woow-k3s -n litellm exec -i deploy/litellm -c litellm -- \
   sh -c 'MASTER_KEY="$LITELLM_MASTER_KEY" python -' < tests/acceptance.py
 
-# Repo vs cluster (exit 0 = identical)
+# Repo vs Helm release vs live objects (exit 0 = identical)
 scripts/check-drift.sh
 ```
 
 `acceptance.py` makes real model calls, which cost OpenRouter credits. It also
 leaves a budget-limited virtual key and a `grill-me` plugin in the database.
 See [tests/README.md](tests/README.md).
+
+## Changing models or settings
+
+```bash
+$EDITOR config/config.yaml          # or values.yaml
+helm --kube-context woow-k3s upgrade litellm . -n litellm
+# A config.yaml change alone does not restart the proxy:
+kubectl --context woow-k3s -n litellm rollout restart deploy/litellm
+```
 
 ## Backup and restore
 
@@ -159,36 +213,74 @@ kubectl $C run pg-restore --rm -i --restart=Never --image=docker.io/library/post
 kubectl $C scale deploy/litellm --replicas=1
 ```
 
-## Design decisions
+## Uninstall
 
-These settings combine the original k3s manifests, the spec that ran in
-production, and the single-host port
-[Woow_podman_litellm](https://github.com/WOOWTECH/Woow_podman_litellm):
+```bash
+helm --kube-context woow-k3s uninstall litellm -n litellm
+```
+
+This removes the workloads, Services, ConfigMap and CronJob. The keep policy
+leaves the `litellm-mcp` namespace, every PVC and any chart-created Secret in
+place. The `litellm` namespace is never managed by the release. To really
+delete everything, including the data:
+
+```bash
+kubectl --context woow-k3s delete namespace litellm litellm-mcp
+# Longhorn "longhorn" is Retain: the PVs stay Released until you delete them.
+```
+
+## Migrating from the kubectl manifests
+
+Up to 2026-09-11 this repository held plain manifests in `k8s/`, applied with
+`kubectl`. Rendered with default values, the chart is resource-equivalent to
+them, field by field. The only intentional differences are:
+
+1. Namespace `litellm` is not rendered, because it is the release namespace.
+2. Namespaces, PVCs and chart-created Secrets carry `helm.sh/resource-policy: keep`.
+3. The `woowtech.io/source` provenance annotation is gone.
+4. The ConfigMap is filled from `config/config.yaml` instead of an embedded copy.
+
+Pod templates, selectors and `volumeClaimTemplates` are unchanged. An existing
+kubectl deployment can therefore be adopted without restarting any pod:
+
+```bash
+helm --kube-context woow-k3s upgrade --install litellm . -n litellm --take-ownership
+```
+
+The old manifests remain in the git history (tag `kubectl-manifests`).
+
+## Design decisions
 
 | Setting | Why |
 |---|---|
-| `DISABLE_SCHEMA_UPDATE=false` | With `true`, an empty database never gets its tables. The original manifests set `true`, but that value never ran in production |
-| `startupProbe` 40×15s | Gives first-boot migrations up to 10 minutes. Afterwards readiness and liveness use 10s timeouts instead of `initialDelaySeconds` |
+| Fixed resource names and labels | The tunnel routes to these Service names. Changing a selector or pod label would restart every pod |
+| `secrets.create=false` by default | An upgrade can never overwrite real keys |
+| Keep policy on Namespaces, PVCs and Secrets | `helm uninstall` can never delete the database or the salt key |
+| `DISABLE_SCHEMA_UPDATE=false` | With `true`, an empty database never gets its tables |
+| `startupProbe` 40×15s | Gives first-boot migrations up to 10 minutes. Afterwards the probes use 10s timeouts |
 | `pg_isready` initContainer | A bare TCP check passes while Postgres is still initialising |
 | `RollingUpdate maxUnavailable 0 / maxSurge 1` | No gap during rollouts. Only the new pod migrates |
 | NetworkPolicy on Postgres | The database holds every key and encrypted credential |
 | `pg_isready` wait in the backup job | On woow-k3s a fresh pod can race the NetworkPolicy controller |
 | cloudflared `--metrics 0.0.0.0:2000` | Pins the port the `/ready` probes use |
-| Longhorn `Retain` | Deleting a PVC does not delete the data |
 
 ## History
 
 - **2026-07-23**: first deployed on the local laptop cluster (context `default`) using `local-path` storage.
 - **2026-08-04**: this repo was written as `Woow_litellm_docker_compose`. Its manifests drifted from what was running and were never applied, apart from the 2026-08-05 model fix.
-- **2026-09-11**: the local cluster lost its nodes and the `local-path` database was lost with them. The gateway was redeployed on woow-k3s from the merged spec with an **empty database**: models and master key unchanged, old virtual keys and spend history gone. The repo was renamed `Woow_k3s_litellm`, and the docker-compose files were removed in favour of Woow_podman_litellm.
+- **2026-09-11**: the local cluster lost its nodes and the `local-path` database was lost with them. The gateway was redeployed on woow-k3s with an empty database: models and master key unchanged, old virtual keys and spend gone. The repo was renamed `Woow_k3s_litellm`, converted to this Helm chart, and the running deployment was adopted as release `litellm`.
 
 ## Related repositories
 
-- [Woow_podman_litellm](https://github.com/WOOWTECH/Woow_podman_litellm): the same stack on a single host with rootless Podman (compose or Quadlet)
+- [Woow_podman_litellm](https://github.com/WOOWTECH/Woow_podman_litellm): the same stack on a single host with rootless Podman
 - [Woow_litellm_mcp_server](https://github.com/WOOWTECH/Woow_litellm_mcp_server): source of the MCP admin console
 
 ## Security
 
-- No real secret is committed. `examples/secrets.example.yaml` holds placeholders, and `.gitignore` blocks secret-shaped files.
+- No real secret is committed. `values.yaml` has empty secret values, `examples/secrets.example.yaml` has placeholders, and CI enforces both.
 - All keys are read from Secrets (`os.environ/...`), never from `config/config.yaml`.
 - Give users scoped virtual keys (`POST /key/generate` with `models` and `max_budget`), never the master key.
+
+## License
+
+Internal WoowTech deployment configuration.

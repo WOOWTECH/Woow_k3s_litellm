@@ -1,0 +1,63 @@
+{{- /*
+Cloudflare Tunnel connector. The tunnel is remote-managed in Cloudflare:
+  litellm.woowtech.io     -> http://litellm:4000
+  litellm-mcp.woowtech.io -> http://litellm-mcp-admin.litellm-mcp.svc.cluster.local:8080
+Only ONE deployment may run a given token: disable this in test installs.
+--metrics 0.0.0.0:2000 pins the listener the /ready probes use.
+*/ -}}
+{{- if .Values.cloudflared.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app: cloudflared
+spec:
+  replicas: {{ .Values.cloudflared.replicas }}
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+        {{- include "litellm.partOf" . | nindent 8 }}
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cloudflared
+      containers:
+        - name: cloudflared
+          image: {{ .Values.cloudflared.image.repository }}:{{ .Values.cloudflared.image.tag }}
+          args: [tunnel, --no-autoupdate, --metrics, 0.0.0.0:2000, run]
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-token
+                  key: TUNNEL_TOKEN
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.cloudflared.resources | nindent 12 }}
+{{- end }}

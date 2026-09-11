@@ -1,63 +1,68 @@
-name: lint
+name: chart
 
 on:
   push:
   pull_request:
+  workflow_dispatch: {}
 
 jobs:
-  manifests:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: YAML parses
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.5
+
+      - name: helm lint
+        run: helm lint .
+
+      - name: helm template (every values combination)
+        run: |
+          S="secrets.create=true,secrets.openrouterApiKey=x,secrets.masterKey=x,secrets.saltKey=x,secrets.postgresPassword=x,secrets.tunnelToken=x,secrets.mcp.adminPassword=x,secrets.mcp.mcpAuthToken=x,secrets.mcp.jwtSecret=x"
+          helm template litellm . -n litellm                > /tmp/production.yaml
+          helm template litellm .                           > /tmp/default-ns.yaml
+          helm template litellm . -n litellm --set "$S"     > /tmp/secrets.yaml
+          helm template litellm . -n litellm \
+            --set cloudflared.enabled=false,mcp.enabled=false,backup.enabled=false,networkPolicy.enabled=false,tests.enabled=false \
+                                                            > /tmp/minimal.yaml
+
+      - name: kubeconform (schema validation)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary /tmp/production.yaml /tmp/default-ns.yaml /tmp/secrets.yaml /tmp/minimal.yaml
+
+      - name: Required secrets are enforced
+        run: |
+          if helm template litellm . --set secrets.create=true > /dev/null 2>&1; then
+            echo "secrets.create=true rendered without any secret values"; exit 1
+          fi
+          echo "required() guards fire"
+
+      - name: No real secrets committed
         run: |
           pip install --quiet pyyaml
           python3 - <<'EOF'
-          import glob, yaml
-          files = glob.glob("k8s/*.yaml") + glob.glob("examples/*.yaml") + ["config/config.yaml"]
-          for f in files:
-              list(yaml.safe_load_all(open(f)))
-              print("ok", f)
-          EOF
-
-      - name: ConfigMap is a byte-for-byte copy of config/config.yaml
-        run: |
-          python3 - <<'EOF'
-          import yaml, sys
-          cm = next(d for d in yaml.safe_load_all(open("k8s/03-litellm-config.yaml")) if d and d["kind"] == "ConfigMap")
-          if cm["data"]["config.yaml"] != open("config/config.yaml").read():
-              sys.exit("k8s/03-litellm-config.yaml is out of sync with config/config.yaml")
-          print("in sync")
-          EOF
-
-      - name: No Secrets in k8s/, placeholders only in examples/
-        run: |
-          python3 - <<'EOF'
-          import glob, yaml, sys
+          import sys, yaml
           bad = []
-          for f in glob.glob("k8s/*.yaml"):
-              for d in yaml.safe_load_all(open(f)):
-                  if d and d["kind"] == "Secret":
-                      bad.append(f"{f}: Secret/{d['metadata']['name']} must live in examples/, not k8s/")
+          s = yaml.safe_load(open("values.yaml"))["secrets"]
+          for k, v in s.items():
+              if k not in ("create", "extraEnv", "mcp") and v:
+                  bad.append(f"values.yaml secrets.{k} must be empty")
+          if s["extraEnv"] or any(s["mcp"].values()):
+              bad.append("values.yaml secrets.extraEnv / secrets.mcp must be empty")
+          for d in yaml.safe_load_all(open("/tmp/production.yaml")):
+              if d and d["kind"] == "Secret":
+                  bad.append("default render must not contain Secrets (secrets.create=false)")
           for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
-              if not d:
-                  continue
-              for k, v in (d.get("stringData") or {}).items():
-                  fixed = k in ("POSTGRES_USER", "POSTGRES_DB", "LITELLM_BASE_URL")
-                  if not fixed and "REPLACE_ME" not in str(v):
+              for k, v in ((d or {}).get("stringData") or {}).items():
+                  if k not in ("POSTGRES_USER", "POSTGRES_DB", "LITELLM_BASE_URL") and "REPLACE_ME" not in str(v):
                       bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
-              if d.get("data"):
-                  bad.append(f"examples: {d['metadata']['name']} uses base64 data; use stringData placeholders")
-          if bad:
-              sys.exit("\n".join(bad))
-          print("no secrets committed")
+          sys.exit("\n".join(bad)) if bad else print("no secrets committed")
           EOF
-
-      - name: Kubernetes schema (kubeconform)
-        run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
-          ./kubeconform -strict -summary k8s/ examples/
 
       - name: Shell scripts parse
         run: bash -n scripts/*.sh

@@ -1,0 +1,68 @@
+{{- /*
+`helm test` smoke pod, read-only:
+  - /health/liveliness 200, /health/readiness 200 with db=connected
+  - /v1/models (master key) lists every model_name in config/config.yaml
+  - MCP console /healthz 200 (when mcp.enabled)
+Uses the LiteLLM image because it already ships Python (and no curl).
+*/ -}}
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-smoke
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    # Kept until the next `helm test` so `helm test --logs` can always read it.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: {{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}
+      command: [python, -c]
+      args:
+        - |
+          import json, os, sys, urllib.request
+          def get(url, key=None):
+              req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key} if key else {})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return r.status, r.read().decode()
+          base = "http://litellm:4000"
+          s, _ = get(base + "/health/liveliness"); assert s == 200, s
+          s, body = get(base + "/health/readiness"); ready = json.loads(body)
+          assert s == 200 and ready.get("db") == "connected", body
+          print("readiness:", ready.get("status"), "db:", ready.get("db"), "version:", ready.get("litellm_version"))
+          s, body = get(base + "/v1/models", os.environ["LITELLM_MASTER_KEY"])
+          listed = {m["id"] for m in json.loads(body)["data"]}
+          missing = set(os.environ["EXPECTED_MODELS"].split(",")) - listed
+          assert not missing, "missing models: %s" % sorted(missing)
+          print("models:", sorted(listed))
+          mcp = os.environ.get("MCP_HEALTHZ")
+          if mcp:
+              s, body = get(mcp); assert s == 200, s
+              print("mcp:", body.strip())
+          print("SMOKE OK")
+      env:
+        - name: LITELLM_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: litellm-secrets
+              key: LITELLM_MASTER_KEY
+        - name: EXPECTED_MODELS
+          value: {{ include "litellm.modelNames" . | quote }}
+        {{- if .Values.mcp.enabled }}
+        - name: MCP_HEALTHZ
+          value: http://litellm-mcp-admin.{{ include "litellm.mcpNs" . }}.svc.cluster.local:8080/healthz
+        {{- end }}
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+{{- end }}

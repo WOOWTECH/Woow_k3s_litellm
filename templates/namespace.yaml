@@ -1,0 +1,29 @@
+{{- /*
+Namespaces. One that equals the release namespace is skipped: Helm keeps its
+release record there, so it is created with --create-namespace instead and
+can never be deleted by `helm uninstall`.
+*/ -}}
+{{- if .Values.namespace.create }}
+{{- if ne .Values.namespace.name .Release.Namespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace.name }}
+  labels:
+    app.kubernetes.io/name: litellm
+    {{- include "litellm.partOf" . | nindent 4 }}
+  {{- include "litellm.keepAnnotations" . | nindent 2 }}
+{{- end }}
+{{- if and .Values.mcp.enabled (ne .Values.mcp.namespace .Release.Namespace) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.mcp.namespace }}
+  labels:
+    app.kubernetes.io/name: litellm-mcp
+    {{- include "litellm.partOf" . | nindent 4 }}
+  {{- include "litellm.keepAnnotations" . | nindent 2 }}
+{{- end }}
+{{- end }}

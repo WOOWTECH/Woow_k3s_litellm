@@ -1,0 +1,16 @@
+# Patterns to ignore when building Helm packages.
+# config/config.yaml must stay in: templates read it with .Files.Get.
+.DS_Store
+.git/
+.gitignore
+.github/
+.helmignore
+*.tgz
+*.bak
+*.tmp
+*.swp
+.idea/
+.vscode/
+README*.md
+examples/
+scripts/
