@@ -1,12 +1,16 @@
 # Real secrets must never be committed - only examples/secrets.example.yaml.
+# Patterns are anchored to the repo root (leading /) on purpose: an unanchored
+# "secrets.yaml" also matched templates/secrets.yaml and kept the chart's own
+# Secret template out of git.
 .env
 .env.*
 *.env
-secrets.yaml
-*-secrets.yaml
-*.secret.yaml
-*secrets.values.yaml
-*.local.yaml
+/secrets.yaml
+/*-secrets.yaml
+/*.secret.yaml
+/*secrets.values.yaml
+/*.local.yaml
+!/templates/secrets.yaml
 
 # Database dumps contain every virtual key and encrypted credential.
 *.dump

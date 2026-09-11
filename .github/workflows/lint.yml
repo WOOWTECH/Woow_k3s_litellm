@@ -41,6 +41,10 @@ jobs:
             echo "secrets.create=true rendered without any secret values"; exit 1
           fi
           echo "required() guards fire"
+          # All 5 Secrets must render; catches templates/secrets.yaml going missing from git.
+          n=$(grep -c '^kind: Secret$' /tmp/secrets.yaml || true)
+          [ "$n" -eq 5 ] || { echo "expected 5 Secrets with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders all 5 Secrets"
 
       - name: No real secrets committed
         run: |
