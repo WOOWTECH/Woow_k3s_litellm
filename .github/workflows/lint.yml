@@ -5,6 +5,12 @@ on:
   pull_request:
   workflow_dispatch: {}
 
+env:
+  # Dummy values only: exercises templates/secrets.yaml without any real key.
+  SECRETS: secrets.create=true,secrets.openrouterApiKey=x,secrets.masterKey=x,secrets.saltKey=x,secrets.postgresPassword=x,secrets.tunnelToken=x
+  KUBECONFORM_VERSION: v0.6.7
+  KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -17,53 +23,126 @@ jobs:
           version: v3.19.5
 
       - name: helm lint
-        run: helm lint .
+        run: |
+          helm lint .
+          helm lint . -f deploy/woow-k3s/litellm.yaml
+          helm lint . --set "$SECRETS"
 
       - name: helm template (every values combination)
         run: |
-          S="secrets.create=true,secrets.openrouterApiKey=x,secrets.masterKey=x,secrets.saltKey=x,secrets.postgresPassword=x,secrets.tunnelToken=x,secrets.mcp.adminPassword=x,secrets.mcp.mcpAuthToken=x,secrets.mcp.jwtSecret=x"
-          helm template litellm . -n litellm                > /tmp/production.yaml
-          helm template litellm .                           > /tmp/default-ns.yaml
-          helm template litellm . -n litellm --set "$S"     > /tmp/secrets.yaml
+          mkdir -p /tmp/r
+          helm template litellm . -n litellm                                   > /tmp/r/production.yaml
+          helm template litellm . -n litellm -f deploy/woow-k3s/litellm.yaml   > /tmp/r/instance.yaml
+          helm template litellm .                                              > /tmp/r/default-ns.yaml
+          helm template litellm . -n litellm --set "$SECRETS"                  > /tmp/r/secrets.yaml
+          helm template litellm . -n litellm --set "$SECRETS" --set keepOnUninstall=false > /tmp/r/no-keep.yaml
           helm template litellm . -n litellm \
-            --set cloudflared.enabled=false,mcp.enabled=false,backup.enabled=false,networkPolicy.enabled=false,tests.enabled=false \
-                                                            > /tmp/minimal.yaml
+            --set cloudflared.enabled=false,backup.enabled=false,networkPolicy.enabled=false,tests.enabled=false \
+                                                                               > /tmp/r/minimal.yaml
+          # The shape of a test install: own namespace, disposable storage, no tunnel.
+          helm template litellm . -n ht-litellm \
+            --set namespace.name=ht-litellm,storageClassName=longhorn-delete,cloudflared.enabled=false \
+            --set "$SECRETS"                                                   > /tmp/r/test-install.yaml
+          wc -l /tmp/r/*.yaml
+
+      - name: Instance values render the same as the live release
+        run: |
+          # deploy/woow-k3s/litellm.yaml restates the defaults the live release uses.
+          diff -u /tmp/r/production.yaml /tmp/r/instance.yaml
+          echo "deploy/woow-k3s/litellm.yaml == chart defaults"
+
+      - name: Every template is tracked and renders
+        run: |
+          # An unanchored .gitignore pattern once kept templates/secrets.yaml out of git.
+          for f in $(find templates -type f); do
+            if git check-ignore --no-index -q "$f"; then echo "::error::$f is matched by .gitignore"; exit 1; fi
+          done
+          for f in $(find templates -type f -name '*.yaml'); do
+            grep -q "^# Source: litellm/$f\$" /tmp/r/*.yaml || { echo "::error::$f never renders"; exit 1; }
+          done
+          echo "every template is tracked and renders"
+
+      - name: The MCP console is not part of this chart
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import glob, sys, yaml
+          bad = []
+          for f in glob.glob("/tmp/r/*.yaml"):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and ("mcp" in d["metadata"]["name"] or d["metadata"].get("namespace") == "litellm-mcp"):
+                      bad.append(f"{f}: {d['kind']}/{d['metadata']['name']}")
+          sys.exit("\n".join(bad)) if bad else print("no MCP object rendered")
+          EOF
 
       - name: kubeconform (schema validation)
         run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar -xz -C /usr/local/bin kubeconform
-          kubeconform -strict -summary /tmp/production.yaml /tmp/default-ns.yaml /tmp/secrets.yaml /tmp/minimal.yaml
+          curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz
+          echo "${KUBECONFORM_SHA256}  /tmp/kc.tgz" | sha256sum -c -
+          tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary /tmp/r/*.yaml
 
       - name: Required secrets are enforced
         run: |
           if helm template litellm . --set secrets.create=true > /dev/null 2>&1; then
             echo "secrets.create=true rendered without any secret values"; exit 1
           fi
+          # Each key on its own: drop it from the dummy set and expect its own required() message.
+          for k in openrouterApiKey masterKey saltKey postgresPassword tunnelToken; do
+            set_without=$(echo "$SECRETS" | tr ',' '\n' | grep -v "^secrets.$k=" | paste -sd, -)
+            if out=$(helm template litellm . -n litellm --set "$set_without" 2>&1); then
+              echo "::error::secrets.$k is not enforced"; exit 1
+            fi
+            echo "$out" | grep -q "secrets.$k is required" || { echo "::error::wrong error for $k: $out"; exit 1; }
+          done
+          # tunnelToken is only needed while cloudflared runs.
+          helm template litellm . -n litellm --set "$(echo "$SECRETS" | sed 's/,secrets.tunnelToken=x//')" \
+            --set cloudflared.enabled=false > /dev/null
           echo "required() guards fire"
-          # All 5 Secrets must render; catches templates/secrets.yaml going missing from git.
-          n=$(grep -c '^kind: Secret$' /tmp/secrets.yaml || true)
-          [ "$n" -eq 5 ] || { echo "expected 5 Secrets with secrets.create=true, got $n"; exit 1; }
-          echo "secrets.create=true renders all 5 Secrets"
+          # All 3 Secrets must render; catches templates/secrets.yaml going missing from git.
+          n=$(grep -c '^kind: Secret$' /tmp/r/secrets.yaml || true)
+          [ "$n" -eq 3 ] || { echo "expected 3 Secrets with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders all 3 Secrets"
 
-      - name: No real secrets committed
+      - name: Keep policy on Namespaces, PVCs and Secrets
         run: |
-          pip install --quiet pyyaml
           python3 - <<'EOF'
           import sys, yaml
           bad = []
+          def objs(f): return [d for d in yaml.safe_load_all(open(f)) if d]
+          for d in objs("/tmp/r/secrets.yaml") + objs("/tmp/r/default-ns.yaml"):
+              if d["kind"] in ("Namespace", "PersistentVolumeClaim", "Secret"):
+                  if (d["metadata"].get("annotations") or {}).get("helm.sh/resource-policy") != "keep":
+                      bad.append(f"{d['kind']}/{d['metadata']['name']} has no keep policy")
+          for d in objs("/tmp/r/production.yaml"):
+              if d["kind"] == "Namespace" and d["metadata"]["name"] == "litellm":
+                  bad.append("the release namespace must never be rendered")
+          sys.exit("\n".join(bad)) if bad else print("keep policy present; release namespace not rendered")
+          EOF
+
+      - name: No real secrets committed
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, yaml
+          bad = []
           s = yaml.safe_load(open("values.yaml"))["secrets"]
           for k, v in s.items():
-              if k not in ("create", "extraEnv", "mcp") and v:
+              if k not in ("create", "extraEnv") and v:
                   bad.append(f"values.yaml secrets.{k} must be empty")
-          if s["extraEnv"] or any(s["mcp"].values()):
-              bad.append("values.yaml secrets.extraEnv / secrets.mcp must be empty")
-          for d in yaml.safe_load_all(open("/tmp/production.yaml")):
-              if d and d["kind"] == "Secret":
-                  bad.append("default render must not contain Secrets (secrets.create=false)")
+          if s["extraEnv"]:
+              bad.append("values.yaml secrets.extraEnv must be empty")
+          for f in glob.glob("deploy/**/*.yaml", recursive=True):
+              v = yaml.safe_load(open(f)) or {}
+              extra = set((v.get("secrets") or {}).keys()) - {"create"}
+              if extra:
+                  bad.append(f"{f}: secret values do not belong in instance values: {sorted(extra)}")
+          for f in ("/tmp/r/production.yaml", "/tmp/r/instance.yaml"):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and d["kind"] == "Secret":
+                      bad.append(f"{f} must not contain Secrets (secrets.create=false)")
           for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
               for k, v in ((d or {}).get("stringData") or {}).items():
-                  if k not in ("POSTGRES_USER", "POSTGRES_DB", "LITELLM_BASE_URL") and "REPLACE_ME" not in str(v):
+                  if k not in ("POSTGRES_USER", "POSTGRES_DB") and "REPLACE_ME" not in str(v):
                       bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
           sys.exit("\n".join(bad)) if bad else print("no secrets committed")
           EOF

@@ -1,0 +1,58 @@
+# Instance values for Helm release `litellm` (namespace litellm) on woow-k3s.
+# NO SECRETS HERE: with secrets.create=false the chart only references the
+# Secrets litellm-secrets, litellm-postgres-secret and cloudflared-token, which
+# live in the cluster (see examples/secrets.example.yaml for their keys).
+#
+# The running release was installed with the chart defaults (`helm get values
+# litellm -n litellm` is empty). This file restates the settings that matter
+# for that instance, so rendering with it must equal the live release:
+#
+#   helm template litellm . -n litellm -f deploy/woow-k3s/litellm.yaml --skip-tests
+#
+# Upgrade (keep the release name and namespace):
+#   helm --kube-context woow-k3s upgrade litellm . -n litellm -f deploy/woow-k3s/litellm.yaml
+# Before the FIRST upgrade with chart 2.x read "Phase 2: MCP objects" in README.md.
+
+namespace:
+  create: true
+  name: litellm
+
+keepOnUninstall: true
+storageClassName: longhorn
+
+secrets:
+  create: false
+
+litellm:
+  image:
+    repository: ghcr.io/berriai/litellm
+    tag: v1.83.14-stable
+  replicas: 1
+  logLevel: ERROR
+
+postgres:
+  image:
+    repository: docker.io/library/postgres
+    tag: 16-alpine
+  storage:
+    size: 5Gi
+
+networkPolicy:
+  enabled: true
+
+# This is the only connector for the litellm tunnel (litellm.woowtech.io and
+# litellm-mcp.woowtech.io). Never enable it in a second installation.
+cloudflared:
+  enabled: true
+  replicas: 2
+
+backup:
+  enabled: true
+  schedule: "15 3 * * *"
+  timeZone: Asia/Taipei
+  retentionDays: 14
+  storage:
+    size: 2Gi
+
+tests:
+  enabled: true

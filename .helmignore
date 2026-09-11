@@ -14,3 +14,7 @@
 README*.md
 examples/
 scripts/
+# Anchored: /tests/ is the in-pod acceptance suite; templates/tests/ must stay.
+/tests/
+# Per-cluster instance values are passed with -f, never packaged.
+/deploy/

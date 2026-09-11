@@ -9,10 +9,6 @@ a selector or pod-template label would restart every pod.
 {{ .Values.namespace.name }}
 {{- end -}}
 
-{{- define "litellm.mcpNs" -}}
-{{ .Values.mcp.namespace }}
-{{- end -}}
-
 {{/* Shared label on every object. */}}
 {{- define "litellm.partOf" -}}
 app.kubernetes.io/part-of: woow-litellm

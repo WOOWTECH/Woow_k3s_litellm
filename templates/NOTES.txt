@@ -1,6 +1,6 @@
 LiteLLM gateway ({{ .Chart.AppVersion }}) - release {{ .Release.Name }}
 
-Namespaces: {{ include "litellm.ns" . }}{{ if .Values.mcp.enabled }}, {{ include "litellm.mcpNs" . }}{{ end }}
+Namespace: {{ include "litellm.ns" . }}
 {{- if not .Values.secrets.create }}
 
 Secrets are NOT managed by this release (secrets.create=false). They must

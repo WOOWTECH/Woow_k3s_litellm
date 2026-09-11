@@ -2,7 +2,6 @@
 `helm test` smoke pod, read-only:
   - /health/liveliness 200, /health/readiness 200 with db=connected
   - /v1/models (master key) lists every model_name in config/config.yaml
-  - MCP console /healthz 200 (when mcp.enabled)
 Uses the LiteLLM image because it already ships Python (and no curl).
 */ -}}
 {{- if .Values.tests.enabled }}
@@ -41,10 +40,6 @@ spec:
           missing = set(os.environ["EXPECTED_MODELS"].split(",")) - listed
           assert not missing, "missing models: %s" % sorted(missing)
           print("models:", sorted(listed))
-          mcp = os.environ.get("MCP_HEALTHZ")
-          if mcp:
-              s, body = get(mcp); assert s == 200, s
-              print("mcp:", body.strip())
           print("SMOKE OK")
       env:
         - name: LITELLM_MASTER_KEY
@@ -54,10 +49,6 @@ spec:
               key: LITELLM_MASTER_KEY
         - name: EXPECTED_MODELS
           value: {{ include "litellm.modelNames" . | quote }}
-        {{- if .Values.mcp.enabled }}
-        - name: MCP_HEALTHZ
-          value: http://litellm-mcp-admin.{{ include "litellm.mcpNs" . }}.svc.cluster.local:8080/healthz
-        {{- end }}
       resources:
         requests:
           cpu: 10m

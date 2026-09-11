@@ -1,6 +1,8 @@
 # Default values for the litellm chart.
-# Defaults reproduce the woow-k3s deployment 1:1: namespaces litellm and
-# litellm-mcp, Longhorn storage, Cloudflare Tunnel, MCP console, daily backups.
+# Defaults reproduce the woow-k3s deployment 1:1 (deploy/woow-k3s/litellm.yaml
+# restates them): namespace litellm, Longhorn storage, Cloudflare Tunnel, daily
+# backups. The LiteLLM MCP admin console is NOT part of this chart; it is its
+# own chart and release in WOOWTECH/Woow_litellm_mcp_server.
 
 namespace:
   # Render the Namespace objects. A namespace equal to the release namespace
@@ -31,10 +33,6 @@ secrets:
   tunnelToken: ""
   # Extra keys for litellm-secrets, e.g. OPENAI_API_KEY, ZAI_API_KEY, MINIMAX_API_KEY.
   extraEnv: {}
-  mcp:
-    adminPassword: ""
-    mcpAuthToken: ""
-    jwtSecret: ""
 
 litellm:
   image:
@@ -105,27 +103,6 @@ backup:
       cpu: 500m
       memory: 256Mi
 
-mcp:
-  # LiteLLM MCP admin console, built on start from gitRepo.
-  enabled: true
-  namespace: litellm-mcp
-  gitRepo: https://github.com/WOOWTECH/Woow_litellm_mcp_server
-  images:
-    git: alpine/git:latest
-    node: node:20-alpine
-    python: python:3.12-slim
-  storage:
-    # "" = use storageClassName
-    className: ""
-    size: 256Mi
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
-
 tests:
-  # `helm test` smoke pod: readiness, DB, model list, MCP health. Read-only.
+  # `helm test` smoke pod: liveness, readiness + DB, model list. Read-only.
   enabled: true
