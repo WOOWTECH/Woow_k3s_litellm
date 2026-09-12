@@ -5,8 +5,15 @@ name): the Cloudflare tunnel routes to these exact Service names, and changing
 a selector or pod-template label would restart every pod.
 */}}
 
+{{- /*
+Object placement. `namespace.name` is EMPTY by default so placement follows
+`-n`/`--namespace`. Setting it makes it win over `-n`, so a
+`-n <test-ns> -f <real instance values>` rehearsal would write to the REAL
+namespace. That happened once on the sibling n8n chart and touched
+production. Never set it in any committed instance values file.
+*/ -}}
 {{- define "litellm.ns" -}}
-{{ .Values.namespace.name }}
+{{ .Values.namespace.name | default .Release.Namespace }}
 {{- end -}}
 
 {{/* Shared label on every object. */}}

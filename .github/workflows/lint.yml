@@ -34,6 +34,9 @@ jobs:
           helm template litellm . -n litellm                                   > /tmp/r/production.yaml
           helm template litellm . -n litellm -f deploy/woow-k3s/litellm.yaml   > /tmp/r/instance.yaml
           helm template litellm .                                              > /tmp/r/default-ns.yaml
+          # namespace.name != release namespace: the only combination that renders
+          # templates/namespace.yaml (empty name follows -n and is skipped by design).
+          helm template litellm . -n litellm --set namespace.name=other-ns       > /tmp/r/other-ns.yaml
           helm template litellm . -n litellm --set "$SECRETS"                  > /tmp/r/secrets.yaml
           helm template litellm . -n litellm --set "$SECRETS" --set keepOnUninstall=false > /tmp/r/no-keep.yaml
           helm template litellm . -n litellm \

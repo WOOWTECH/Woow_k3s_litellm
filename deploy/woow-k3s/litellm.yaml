@@ -13,9 +13,6 @@
 #   helm --kube-context woow-k3s upgrade litellm . -n litellm -f deploy/woow-k3s/litellm.yaml
 # Before the FIRST upgrade with chart 2.x read "Phase 2: MCP objects" in README.md.
 
-namespace:
-  create: true
-  name: litellm
 
 keepOnUninstall: true
 storageClassName: longhorn
