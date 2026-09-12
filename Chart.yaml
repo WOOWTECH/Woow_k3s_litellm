@@ -2,10 +2,11 @@ apiVersion: v2
 name: litellm
 description: >-
   WoowTech LiteLLM gateway on K3s: an OpenAI-compatible proxy in front of
-  OpenRouter-backed models, PostgreSQL on Longhorn, a Cloudflare Tunnel, the
-  LiteLLM MCP admin console and daily pg_dump backups.
+  OpenRouter-backed models, PostgreSQL on Longhorn, a Cloudflare Tunnel and
+  daily pg_dump backups. The LiteLLM MCP admin console is a separate chart in
+  WOOWTECH/Woow_litellm_mcp_server.
 type: application
-version: 1.0.0
+version: 2.0.0
 appVersion: "1.83.14"
 kubeVersion: ">=1.27.0-0"
 keywords:
@@ -14,12 +15,10 @@ keywords:
   - gateway
   - openai
   - openrouter
-  - mcp
 home: https://github.com/WOOWTECH/Woow_k3s_litellm
 sources:
   - https://github.com/WOOWTECH/Woow_k3s_litellm
   - https://github.com/WOOWTECH/Woow_podman_litellm
-  - https://github.com/WOOWTECH/Woow_litellm_mcp_server
   - https://github.com/BerriAI/litellm
 maintainers:
   - name: WoowTech

@@ -2,6 +2,7 @@
 Cloudflare Tunnel connector. The tunnel is remote-managed in Cloudflare:
   litellm.woowtech.io     -> http://litellm:4000
   litellm-mcp.woowtech.io -> http://litellm-mcp-admin.litellm-mcp.svc.cluster.local:8080
+                             (the MCP console, deployed by the Woow_litellm_mcp_server chart)
 Only ONE deployment may run a given token: disable this in test installs.
 --metrics 0.0.0.0:2000 pins the listener the /ready probes use.
 */ -}}
