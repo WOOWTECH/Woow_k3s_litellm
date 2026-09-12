@@ -3,12 +3,12 @@ Namespaces. One that equals the release namespace is skipped: Helm keeps its
 release record there, so it is created with --create-namespace instead and
 can never be deleted by `helm uninstall`.
 */ -}}
-{{- if and .Values.namespace.create (ne .Values.namespace.name .Release.Namespace) }}
+{{- if and .Values.namespace.create (ne (include "litellm.ns" .) .Release.Namespace) }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace.name }}
+  name: {{ include "litellm.ns" . }}
   labels:
     app.kubernetes.io/name: litellm
     {{- include "litellm.partOf" . | nindent 4 }}

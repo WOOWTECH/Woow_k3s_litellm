@@ -9,7 +9,7 @@ namespace:
   # (`-n`) is never rendered - create it with --create-namespace instead - so
   # `helm uninstall` can never delete the namespace the release lives in.
   create: true
-  name: litellm
+  name: ""
 
 # Add `helm.sh/resource-policy: keep` to Namespaces, PVCs and chart-created
 # Secrets, so `helm uninstall` never deletes data or LITELLM_SALT_KEY.
