@@ -40,8 +40,26 @@ annotations:
 http://litellm.{{ .Values.namespace.name }}.svc.cluster.local:4000
 {{- end -}}
 
+{{/*
+Image reference for a component, double-pinned as repo:tag@sha256 when a digest
+is set (the tag stays human-readable; the digest is what the kubelet actually
+pulls, so a mutated or re-pushed tag can never change the running image).
+Call with the image map, e.g. (include "litellm.imageRef" .Values.litellm.image).
+*/}}
+{{- define "litellm.imageRef" -}}
+{{- if .digest -}}
+{{ .repository }}:{{ .tag }}@{{ .digest }}
+{{- else -}}
+{{ .repository }}:{{ .tag }}
+{{- end -}}
+{{- end -}}
+
+{{- define "litellm.litellmImage" -}}
+{{ include "litellm.imageRef" .Values.litellm.image }}
+{{- end -}}
+
 {{- define "litellm.postgresImage" -}}
-{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}
+{{ include "litellm.imageRef" .Values.postgres.image }}
 {{- end -}}
 
 {{/* model_name values from config/config.yaml, comma-separated. */}}

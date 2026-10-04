@@ -23,7 +23,8 @@ secrets:
 litellm:
   image:
     repository: ghcr.io/berriai/litellm
-    tag: v1.83.14-stable
+    tag: "1.103.3"
+    digest: sha256:e6e1c46cec92ab58b7ff95c790420aba9f05269b662a66c0dd11714171b9c64b
   replicas: 1
   logLevel: ERROR
 
@@ -31,11 +32,13 @@ postgres:
   image:
     repository: docker.io/library/postgres
     tag: 16-alpine
+    digest: sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
   storage:
     size: 5Gi
 
 networkPolicy:
   enabled: true
+  restrictProxyIngress: true
 
 # This is the only connector for the litellm tunnel (litellm.woowtech.io and
 # litellm-mcp.woowtech.io). Never enable it in a second installation.

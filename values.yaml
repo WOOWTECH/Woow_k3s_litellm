@@ -37,7 +37,13 @@ secrets:
 litellm:
   image:
     repository: ghcr.io/berriai/litellm
-    tag: v1.83.14-stable
+    # 1.84.0 onward drops the "-stable"/"-nightly" suffixes (pure SemVer). This
+    # pins the root image variant (unchanged from the previous deployment).
+    tag: "1.103.3"
+    # Multi-arch index digest for tag 1.103.3 (what the kubelet pulls). Verify
+    # before bumping: see docs/security and the PR that introduced this value.
+    #   cosign verify --key <BerriAI cosign.pub> ghcr.io/berriai/litellm@<digest>
+    digest: sha256:e6e1c46cec92ab58b7ff95c790420aba9f05269b662a66c0dd11714171b9c64b
     pullPolicy: IfNotPresent
   replicas: 1
   # ERROR is the quiet production baseline; INFO is what the CLI calls --debug.
@@ -53,7 +59,13 @@ litellm:
 postgres:
   image:
     repository: docker.io/library/postgres
+    # Keep PostgreSQL on the 16 line (do NOT bump the major version: a major
+    # upgrade needs a dump/restore, not an in-place pod swap). The floating
+    # `16-alpine` tag is pinned to the exact multi-arch index digest the live
+    # release is already running (Postgres 16.14), so an upgrade of the gateway
+    # never silently restarts the database pod onto a newer base image.
     tag: 16-alpine
+    digest: sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
   storage:
     # "" = use storageClassName
     className: ""
@@ -67,8 +79,15 @@ postgres:
       memory: 1Gi
 
 networkPolicy:
-  # Only the proxy (app=litellm) and the backup job (app=litellm-backup) may reach Postgres.
+  # Master switch for every NetworkPolicy this chart renders.
+  # When enabled, only the proxy (app=litellm) and the backup job
+  # (app=litellm-backup) may reach Postgres.
   enabled: true
+  # Also lock down ingress to the proxy on :4000 (NetworkPolicy litellm-ingress):
+  # only cloudflared, the `helm test` smoke pod and the litellm-mcp namespace may
+  # connect. Closes the in-cluster vector for the Host-header auth bypass
+  # (CVE-2026-49468) and unauthenticated MCP (CVE-2026-59822). Keep this on.
+  restrictProxyIngress: true
 
 cloudflared:
   # Only ONE deployment may run a given tunnel token; a second set of

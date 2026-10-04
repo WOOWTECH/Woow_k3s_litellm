@@ -9,7 +9,13 @@
 # hardcoded in this file. The same rule applies to the master key and the
 # database URL.
 #
-# LiteLLM version: v1.83.14  (image ghcr.io/berriai/litellm:v1.83.14-stable)
+# LiteLLM version: 1.103.3  (image ghcr.io/berriai/litellm:1.103.3)
+#
+# NOTE (v1.103.0, PR #41779): settings DECLARED in this config file take
+# precedence over the same setting stored in the DB / set in the UI. This file
+# only declares model_list, general_settings and litellm_settings; models added
+# later through the Admin UI are stored in the DB and remain ADDITIVE to the
+# model_list below (they are not removed by this precedence rule).
 # =============================================================================
 
 model_list:

@@ -21,7 +21,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: smoke
-      image: {{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}
+      image: {{ include "litellm.litellmImage" . }}
       command: [python, -c]
       args:
         - |
