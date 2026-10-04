@@ -66,7 +66,7 @@ spec:
               memory: 64Mi
       containers:
         - name: litellm
-          image: {{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}
+          image: {{ include "litellm.litellmImage" . }}
           imagePullPolicy: {{ .Values.litellm.image.pullPolicy }}
           args: [--config, /etc/litellm/config.yaml, --port, "4000"]
           ports:
@@ -135,3 +135,41 @@ spec:
     - name: http
       port: 4000
       targetPort: 4000
+{{- /*
+Restrict who may reach the proxy on :4000. The baseline cluster leaves most
+namespaces without a NetworkPolicy, so without this every pod in the cluster
+can open a TCP session straight to the litellm pod with an attacker-controlled
+Host header - the in-cluster vector for CVE-2026-49468 (Host-header auth
+bypass) and CVE-2026-59822 (unauthenticated MCP). Only cloudflared (the public
+tunnel), the `helm test` smoke pod and the litellm-mcp namespace (the admin
+console) are allowed in. Defence in depth, not a substitute for the version bump.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.restrictProxyIngress }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: litellm-ingress
+  namespace: {{ include "litellm.ns" . }}
+  labels:
+    {{- include "litellm.partOf" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: litellm
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: smoke-test
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm-mcp
+      ports:
+        - port: 4000
+          protocol: TCP
+{{- end }}

@@ -1,6 +1,7 @@
 {{- /*
 `helm test` smoke pod, read-only:
   - /health/liveliness 200, /health/readiness 200 with db=connected
+  - prints the running LiteLLM version (package metadata)
   - /v1/models (master key) lists every model_name in config/config.yaml
 Uses the LiteLLM image because it already ships Python (and no curl).
 */ -}}
@@ -21,7 +22,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: smoke
-      image: {{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}
+      image: {{ include "litellm.litellmImage" . }}
       command: [python, -c]
       args:
         - |
@@ -31,10 +32,25 @@ spec:
               with urllib.request.urlopen(req, timeout=30) as r:
                   return r.status, r.read().decode()
           base = "http://litellm:4000"
-          s, _ = get(base + "/health/liveliness"); assert s == 200, s
+          # k3s' NetworkPolicy controller only adds a new pod's IP to the
+          # allow-list a few seconds after the pod starts; until then the
+          # litellm-ingress policy rejects it (Connection refused). Retry the
+          # first request instead of failing on that race.
+          import time
+          for attempt in range(30):
+              try:
+                  s, _ = get(base + "/health/liveliness"); break
+              except OSError as e:
+                  if attempt == 29: raise
+                  print("waiting for network policy:", e); time.sleep(2)
+          assert s == 200, s
           s, body = get(base + "/health/readiness"); ready = json.loads(body)
           assert s == 200 and ready.get("db") == "connected", body
-          print("readiness:", ready.get("status"), "db:", ready.get("db"), "version:", ready.get("litellm_version"))
+          # 1.103.x no longer reports litellm_version on the unauthenticated
+          # readiness endpoint; read the installed package version instead.
+          import importlib.metadata
+          version = ready.get("litellm_version") or importlib.metadata.version("litellm")
+          print("readiness:", ready.get("status"), "db:", ready.get("db"), "version:", version)
           s, body = get(base + "/v1/models", os.environ["LITELLM_MASTER_KEY"])
           listed = {m["id"] for m in json.loads(body)["data"]}
           missing = set(os.environ["EXPECTED_MODELS"].split(",")) - listed

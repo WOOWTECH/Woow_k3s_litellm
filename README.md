@@ -52,6 +52,7 @@ before the first upgrade of the live release to 2.x.
 |---|---|---|
 | `templates/litellm.yaml` | ConfigMap (from `config/config.yaml`), Deployment, Service :4000 | always |
 | `templates/postgres.yaml` | headless Service, StatefulSet, NetworkPolicy | `networkPolicy.enabled` |
+| `templates/litellm.yaml` (NP) | `litellm-ingress` NetworkPolicy on :4000 | `networkPolicy.enabled` + `restrictProxyIngress` |
 | `templates/cloudflared.yaml` | Deployment ×2 | `cloudflared.enabled` |
 | `templates/backup.yaml` | PVC, CronJob | `backup.enabled` |
 | `templates/secrets.yaml` | the 3 Secrets (`litellm-secrets`, `litellm-postgres-secret`, `cloudflared-token`) | `secrets.create` |
@@ -168,7 +169,9 @@ joins the same tunnel and Cloudflare splits traffic between them. Set
 | `keepOnUninstall` | `true` | `helm.sh/resource-policy: keep` on Namespaces, PVCs and chart-created Secrets |
 | `storageClassName` | `longhorn` | Default StorageClass (Longhorn, reclaimPolicy Retain) |
 | `secrets.create` | `false` | Render the Secrets from `secrets.*` instead of using existing ones |
-| `litellm.image.tag` | `v1.83.14-stable` | LiteLLM version |
+| `litellm.image.tag` / `litellm.image.digest` | `1.103.3` / `sha256:e6e1c46c…` | LiteLLM version, double-pinned `tag@digest` |
+| `postgres.image.tag` / `postgres.image.digest` | `16-alpine` / `sha256:e013e867…` | PostgreSQL 16.14, pinned to the live digest |
+| `networkPolicy.restrictProxyIngress` | `true` | Also lock down ingress to the proxy :4000 (`litellm-ingress`) |
 | `litellm.logLevel` | `ERROR` | `LITELLM_LOG` |
 | `litellm.resources` | 250m/512Mi → 2/2Gi | Proxy requests/limits |
 | `postgres.storage.size` | `5Gi` | Database volume |
@@ -334,6 +337,8 @@ The old manifests remain in the git history (tag `kubectl-manifests`).
 | `pg_isready` initContainer | A bare TCP check passes while Postgres is still initialising |
 | `RollingUpdate maxUnavailable 0 / maxSurge 1` | No gap during rollouts. Only the new pod migrates |
 | NetworkPolicy on Postgres | The database holds every key and encrypted credential |
+| `litellm-ingress` NetworkPolicy on :4000 | The baseline cluster leaves most namespaces without a NetworkPolicy, so any pod could reach the proxy with a forged Host header. Only cloudflared, the smoke pod and `litellm-mcp` are allowed in (in-cluster mitigation for CVE-2026-49468 / CVE-2026-59822) |
+| Images double-pinned `tag@sha256` | The tag stays readable; the digest is what runs, so a mutated or re-pushed tag can never change the image. Postgres stays on 16 (no major bump) |
 | `pg_isready` wait in the backup job | On woow-k3s a fresh pod can race the NetworkPolicy controller |
 | cloudflared `--metrics 0.0.0.0:2000` | Pins the port the `/ready` probes use |
 
@@ -343,6 +348,7 @@ The old manifests remain in the git history (tag `kubectl-manifests`).
 - **2026-08-04**: this repo was written as `Woow_litellm_docker_compose`. Its manifests drifted from what was running and were never applied, apart from the 2026-08-05 model fix.
 - **2026-09-11**: the local cluster lost its nodes and the `local-path` database was lost with them. The gateway was redeployed on woow-k3s with an empty database: models and master key unchanged, old virtual keys and spend gone. The repo was renamed `Woow_k3s_litellm`, converted to this Helm chart, and the running deployment was adopted as release `litellm`.
 - **2026-09-12**: chart 2.0.0 moves the MCP console to its own chart in Woow_litellm_mcp_server and adds `deploy/woow-k3s/litellm.yaml`.
+- **2026-10-04**: chart 2.1.0 — security upgrade. LiteLLM `v1.83.14-stable` → `1.103.3` (patches CVE-2026-49468 Host-header auth bypass, CVE-2026-59822 unauthenticated MCP / CISA KEV, GHSA-g5ff arbitrary file read, and the rest of the <1.84 / <1.95 / <1.101 window; 1.83.x is EOL). Images are now double-pinned `tag@sha256`, Postgres is pinned to its live digest (still 16.14, no major bump), and a `litellm-ingress` NetworkPolicy closes the in-cluster vector. From 1.84.0 upstream tags have no `-stable` suffix (pure SemVer).
 
 ## Related repositories
 
