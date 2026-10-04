@@ -6,7 +6,7 @@ description: >-
   daily pg_dump backups. The LiteLLM MCP admin console is a separate chart in
   WOOWTECH/Woow_litellm_mcp_server.
 type: application
-version: 2.1.0
+version: 2.1.1
 appVersion: "1.103.3"
 kubeVersion: ">=1.27.0-0"
 keywords:

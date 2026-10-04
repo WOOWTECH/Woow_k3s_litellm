@@ -32,7 +32,18 @@ spec:
               with urllib.request.urlopen(req, timeout=30) as r:
                   return r.status, r.read().decode()
           base = "http://litellm:4000"
-          s, _ = get(base + "/health/liveliness"); assert s == 200, s
+          # k3s' NetworkPolicy controller only adds a new pod's IP to the
+          # allow-list a few seconds after the pod starts; until then the
+          # litellm-ingress policy rejects it (Connection refused). Retry the
+          # first request instead of failing on that race.
+          import time
+          for attempt in range(30):
+              try:
+                  s, _ = get(base + "/health/liveliness"); break
+              except OSError as e:
+                  if attempt == 29: raise
+                  print("waiting for network policy:", e); time.sleep(2)
+          assert s == 200, s
           s, body = get(base + "/health/readiness"); ready = json.loads(body)
           assert s == 200 and ready.get("db") == "connected", body
           # 1.103.x no longer reports litellm_version on the unauthenticated
